@@ -5,167 +5,210 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math/big"
-	mathRand "math/rand"
-	"net/http"
 
 	"github.com/emmansun/gmsm/sm2"
 	"github.com/emmansun/gmsm/sm3"
 )
 
-// 定义椭圆曲线参数的固定值
+// 固定参数A和B
 var fixedA, _ = new(big.Int).SetString("FFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000FFFFFFFFFFFFFFFC", 16)
 var fixedB, _ = new(big.Int).SetString("FFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000FFFFFFFFFFFFFFFD", 16)
 
-// HAParams 结构体用于存储计算 HA 所需的参数
+// HAParams结构体存储用户信息和曲线参数
 type HAParams struct {
-	UserID  string         `json:"user_id"`  // 用户 ID
-	EntlenA int            `json:"entlen_a"` // entlenA 的长度
-	Curve   elliptic.Curve `json:"-"`        // 椭圆曲线
-	XPub    *big.Int       `json:"x_pub"`    // 公钥的 x 坐标
-	YPub    *big.Int       `json:"y_pub"`    // 公钥的 y 坐标
-	UAx     *big.Int       `json:"u_ax"`     // UA x 坐标
-	UAy     *big.Int       `json:"u_ay"`     // UA y 坐标
+	userID  string         // 用户ID
+	entlenA int            // A的长度
+	curve   elliptic.Curve // 椭圆曲线
+	xPub    *big.Int       // 公钥X坐标
+	yPub    *big.Int       // 公钥Y坐标
 }
 
-// 生成 KGC 的主密钥对
+// 生成主密钥对
 func GenerateMasterKeyPair() (*sm2.PrivateKey, *ecdsa.PublicKey, error) {
-	ms, err := sm2.GenerateKey(rand.Reader)
+	privateKey, err := sm2.GenerateKey(rand.Reader) // 生成私钥
 	if err != nil {
 		return nil, nil, fmt.Errorf("生成主密钥失败: %v", err)
 	}
-	curve := sm2.P256()
-	PpubX, PpubY := curve.ScalarBaseMult(ms.D.Bytes())
-	Ppub := &ecdsa.PublicKey{Curve: curve, X: PpubX, Y: PpubY}
-	return ms, Ppub, nil
+
+	// 转换为ECDSA公钥
+	ecdsaPublicKey := &ecdsa.PublicKey{
+		Curve: sm2.P256(),
+		X:     privateKey.PublicKey.X,
+		Y:     privateKey.PublicKey.Y,
+	}
+
+	return privateKey, ecdsaPublicKey, nil
 }
 
-// 计算 HA 值
+// 计算HA
 func CalculateHA(params HAParams) []byte {
-	entla := make([]byte, 2)
-	binary.BigEndian.PutUint16(entla, uint16(params.EntlenA))
-	ida := []byte(params.UserID)
-	xG := params.Curve.Params().Gx
-	yG := params.Curve.Params().Gy
-	a := fixedA.Bytes()
-	b := fixedB.Bytes()
+	entla := make([]byte, 2)                                  // 创建长度为2的字节切片
+	binary.BigEndian.PutUint16(entla, uint16(params.entlenA)) // 存储A的长度
+	ida := []byte(params.userID)                              // 转换用户ID为字节
+	xG := params.curve.Params().Gx                            // 获取基点X坐标
+	yG := params.curve.Params().Gy                            // 获取基点Y坐标
+	a := fixedA.Bytes()                                       // 固定参数A的字节表示
+	b := fixedB.Bytes()                                       // 固定参数B的字节表示
 
+	// 拼接数据
 	data := bytes.Join([][]byte{
 		entla, ida, a, b,
 		xG.Bytes(), yG.Bytes(),
-		params.XPub.Bytes(), params.YPub.Bytes(),
+		params.xPub.Bytes(), params.yPub.Bytes(),
 	}, nil)
 
-	hash := sha256.New()
-	hash.Write(data)
-	return hash.Sum(nil)
+	// 打印输入数据
+	fmt.Printf("HA输入数据:\n")
+	fmt.Printf("  entla: %x\n", entla)              // 打印A的长度
+	fmt.Printf("  ida: %x\n", ida)                  // 打印用户ID
+	fmt.Printf("  a: %x\n", a)                      // 打印固定参数A
+	fmt.Printf("  b: %x\n", b)                      // 打印固定参数B
+	fmt.Printf("  xG: %x\n", xG.Bytes())            // 打印基点X坐标
+	fmt.Printf("  yG: %x\n", yG.Bytes())            // 打印基点Y坐标
+	fmt.Printf("  xPub: %x\n", params.xPub.Bytes()) // 打印公钥X坐标
+	fmt.Printf("  yPub: %x\n", params.yPub.Bytes()) // 打印公钥Y坐标
+	fmt.Printf("  合并数据: %x\n", data)                // 打印拼接后的数据
+
+	hash := sm3.New()    // 创建SM3哈希
+	hash.Write(data)     // 写入数据
+	return hash.Sum(nil) // 返回哈希值
 }
 
-// 固定种子初始化随机数生成器
-var seededRand2 = mathRand.New(mathRand.NewSource(67890))
-
-// 生成 kgc 随机数 W
-func GetRandomW(n *big.Int) (*big.Int, error) {
-	W := new(big.Int)
-	nMinusOne := new(big.Int).Sub(n, big.NewInt(1))
-	for {
-		W.SetInt64(seededRand2.Int63n(nMinusOne.Int64()-1) + 1)
-
-		if W.Cmp(big.NewInt(1)) >= 0 && W.Cmp(n) < 0 {
-			break
-		}
-	}
-	return W, nil
+// 检查点是否在曲线上
+func isPointOnCurve(curve elliptic.Curve, x, y *big.Int) bool {
+	return curve.IsOnCurve(x, y)
 }
 
-// CalculateWA 计算 WA = [W]G + UA
-func CalculateWA(uaX, uaY *big.Int) (*big.Int, *big.Int, error) {
-	n := sm2.P256().Params().N
-	W, err := GetRandomW(n)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	curve := sm2.P256()
-	WAx, WAy := curve.ScalarBaseMult(W.Bytes())
-	WAx, WAy = curve.Add(WAx, WAy, uaX, uaY)
-
-	return WAx, WAy, nil
-}
-
-// 计算 L 值
+// 计算L值
 func CalculateL(waX, waY *big.Int, ha []byte) *big.Int {
-	waCoords := append(waX.Bytes(), waY.Bytes()...)
-	dataForL := append(waCoords, ha...)
+	waCoords := append(waX.Bytes(), waY.Bytes()...) // 拼接WA的坐标
+	dataForL := append(waCoords, ha...)             // 拼接计算L的输入数据
+	hashL := sm3.New()                              // 创建SM3哈希
+	hashL.Write(dataForL)                           // 写入数据
+	l := new(big.Int).SetBytes(hashL.Sum(nil))      // 获取哈希结果
+	l.Mod(l, sm2.P256().Params().N)                 // 对N取模
 
-	hashL := sm3.New()
-	hashL.Write(dataForL)
-	hashValue := hashL.Sum(nil)
-
-	l := new(big.Int).SetBytes(hashValue)
-	l.Mod(l, sm2.P256().Params().N)
+	// 打印计算结果
+	fmt.Printf("waX: %s, waY: %s, ha: %x\n", waX.String(), waY.String(), ha) // 打印输入数据
+	fmt.Printf("计算的l: %s\n", l.String())                                     // 打印计算出的L值
+	fmt.Printf("CalculateL中的HA: %x\n", ha)                                   // 打印HA值
 
 	return l
 }
 
-// 计算 tA
-func CalculateTA(n *big.Int, ha []byte, waX, waY *big.Int) (*big.Int, error) {
-	w, err := GetRandomW(n)
+// 生成KGC部分密钥
+func GenerateKGCPartialKey(userID string, entlenA int, kgcPrivateKey *sm2.PrivateKey, userPublicKey *ecdsa.PublicKey, ua *ecdsa.PublicKey, userEmail string, kgcPublicKey *ecdsa.PublicKey) (*ecdsa.PublicKey, *big.Int) {
+	curve := sm2.P256()                          // 使用SM2曲线
+	xPub, yPub := kgcPublicKey.X, kgcPublicKey.Y // 获取KGC公钥坐标
+
+	// 设置HA参数
+	params := HAParams{
+		userID:  userID,
+		entlenA: entlenA,
+		curve:   curve,
+		xPub:    xPub,
+		yPub:    yPub,
+	}
+	ha := CalculateHA(params) // 计算HA
+
+	w, err := sm2.GenerateKey(rand.Reader) // 生成随机密钥w
 	if err != nil {
-		return nil, err
+		fmt.Printf("生成KGC部分密钥失败: %v\n", err)
+		return nil, nil
 	}
 
-	ms, _, err := GenerateMasterKeyPair()
-	if err != nil {
-		return nil, err
+	// 打印生成的随机密钥
+	fmt.Printf("生成的随机密钥w: d: %s, 公钥: (%s, %s)\n", w.D.String(), w.PublicKey.X.String(), w.PublicKey.Y.String()) // 打印随机密钥信息
+
+	// 计算WA
+	waX, waY := curve.Add(userPublicKey.X, userPublicKey.Y, w.PublicKey.X, w.PublicKey.Y)
+	if !isPointOnCurve(curve, waX, waY) { // 检查WA是否在曲线上
+		fmt.Println("WA不在曲线上！")
+		return nil, nil
 	}
 
-	l := CalculateL(waX, waY, ha)
+	l := CalculateL(waX, waY, ha)                                                                         // 计算L
+	tA := new(big.Int).Mod(new(big.Int).Add(w.D, new(big.Int).Mul(l, kgcPrivateKey.D)), curve.Params().N) // 计算tA
 
-	lms := new(big.Int).Mul(l, ms.D)
-	tA := new(big.Int).Add(w, lms)
-	tA.Mod(tA, n)
+	// 打印生成结果
+	fmt.Printf("生成的WA: (%s, %s)\n", waX.String(), waY.String()) // 打印WA坐标
+	fmt.Printf("生成的tA: %s\n", tA.String())                      // 打印tA值
+	fmt.Printf("用户邮箱: %s\n", userEmail)                         // 打印用户邮箱
 
-	return tA, nil
+	return &ecdsa.PublicKey{Curve: curve, X: waX, Y: waY}, tA
 }
 
-// HTTP 处理函数
-func HandleRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
-		return
-	}
+// 生成用户密钥
+func GenerateUserKey(entlenA int, kgcPublicKey *ecdsa.PublicKey, kgcPrivateKey *sm2.PrivateKey, userEmail string) (*big.Int, *ecdsa.PublicKey, *big.Int) {
+	userID := userEmail // 使用用户邮箱作为用户ID
 
-	var params HAParams
-	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
-		return
-	}
-	params.Curve = sm2.P256() // 设置曲线
-
-	ha := CalculateHA(params)
-
-	// 计算 WA
-	waX, waY, err := CalculateWA(params.UAx, params.UAy)
+	dA_, err := rand.Int(rand.Reader, kgcPublicKey.Curve.Params().N) // 生成随机d'A
 	if err != nil {
-		http.Error(w, "计算 WA 失败", http.StatusInternalServerError)
-		return
+		fmt.Printf("生成随机d'A失败: %v\n", err)
+		return nil, nil, nil
+	}
+	fmt.Printf("生成的d'A: %s\n", dA_) // 打印生成的d'A
+
+	curve := kgcPublicKey.Curve                   // 获取曲线
+	UAx, UAy := curve.ScalarBaseMult(dA_.Bytes()) // 计算用户公钥
+
+	// 生成KGC部分密钥
+	waPublicKey, tA := GenerateKGCPartialKey(userID, entlenA, kgcPrivateKey, kgcPublicKey, &ecdsa.PublicKey{Curve: curve, X: UAx, Y: UAy}, userEmail, kgcPublicKey)
+
+	dA := new(big.Int).Mod(new(big.Int).Add(tA, dA_), curve.Params().N) // 计算dA
+
+	if dA.Sign() == 0 { // 检查dA是否为0
+		fmt.Println("dA为0，返回A1")
+		return nil, nil, nil
 	}
 
-	response := map[string]interface{}{
-		"ha": fmt.Sprintf("%x", ha),
-		"wa": fmt.Sprintf("%x,%x", waX, waY),
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	return dA, waPublicKey, tA // 返回dA、WA公钥和tA
 }
 
-// 启动 HTTP 服务器
-func StartServer() {
-	http.HandleFunc("/calculate_ha", HandleRequest)
-	http.ListenAndServe(":8080", nil)
+// 验证密钥对
+func VerifyKeyPair(dA *big.Int, WA *ecdsa.PublicKey, userID string, entlenA int, kgcPublicKey *ecdsa.PublicKey, receivedWAPubKey *ecdsa.PublicKey, receivedTA *big.Int) bool {
+	ha := CalculateHA(HAParams{
+		userID:  userID,
+		entlenA: entlenA,
+		curve:   sm2.P256(),
+		xPub:    kgcPublicKey.X, // 使用KGC公钥的X坐标
+		yPub:    kgcPublicKey.Y, // 使用KGC公钥的Y坐标
+	})
+	fmt.Printf("在VerifyKeyPair中计算的HA: %x，用户ID: %s\n", ha, userID) // 打印HA和用户ID
+
+	l := CalculateL(WA.X, WA.Y, ha) // 计算L
+
+	PAx, PAy := WA.X, WA.Y                                                          // WA的坐标
+	Ppub := &ecdsa.PublicKey{Curve: WA.Curve, X: kgcPublicKey.X, Y: kgcPublicKey.Y} // KGC公钥
+
+	// 计算PA的坐标
+	lPpubX, lPpubY := WA.Curve.ScalarMult(Ppub.X, Ppub.Y, l.Bytes())
+	PAx, PAy = WA.Curve.Add(PAx, PAy, lPpubX, lPpubY)
+
+	if !WA.Curve.IsOnCurve(PAx, PAy) { // 检查PA是否在曲线上
+		fmt.Printf("PA坐标不在曲线上\n")
+		return false
+	}
+
+	fmt.Printf("PA坐标: (%s, %s)\n", PAx.String(), PAy.String()) // 打印PA坐标
+
+	PAPx, PAPy := WA.Curve.ScalarBaseMult(dA.Bytes())             // 计算P'A坐标
+	fmt.Printf("P'A坐标: (%s, %s)\n", PAPx.String(), PAPy.String()) // 打印P'A坐标
+
+	if !WA.Curve.IsOnCurve(PAPx, PAPy) { // 检查P'A是否在曲线上
+		fmt.Printf("P'A坐标不在曲线上\n")
+		return false
+	}
+
+	// 比较PA和P'A坐标
+	if PAx.Cmp(PAPx) == 0 && PAy.Cmp(PAPy) == 0 {
+		fmt.Println("验证成功") // 验证成功的输出
+		return true
+	}
+
+	fmt.Println("验证失败") // 验证失败的输出
+	return false
 }
